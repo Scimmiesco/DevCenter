@@ -1,0 +1,5 @@
+{
+  "name": "GitRetro",
+  "description": "A minimalist professional retrospective generator for GitHub users. Visualizes your year in commits with impact categories and statistical insights.",
+  "requestFramePermissions": []
+}
