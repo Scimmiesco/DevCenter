@@ -135,7 +135,7 @@ export const buildPrompt = (
 
             dataFocus = `
         Commits de HOJE (${todayCommits.length}):
-        ${todayCommits.map(c => `- ${c.message} (${c.repo})`).join('\n')}
+        ${todayCommits.map(c => `- ${c.message} (${c.repo})\n  Detalhes: ${c.body || 'Sem descrição adicional.'}`).join('\n')}
 
         Commits RECENTES (${pastCommits.length}):
         ${pastCommits.slice(0, 15).map(c => `- ${c.message} (${c.repo})`).join('\n')}
@@ -149,7 +149,7 @@ export const buildPrompt = (
         Agrupe por funcionalidades entregues e fale sobre o valor gerado.
       `;
             dataFocus = `Commits da Sprint (Total ${filteredCommits.length}): \n` +
-                filteredCommits.slice(0, 50).map(c => `[${c.repo}] ${c.message} (Tipo: ${c.category})`).join('\n');
+                filteredCommits.slice(0, 50).map(c => `[${c.repo}] ${c.message} (Tipo: ${c.category})\nDescrição: ${c.body || 'N/A'}`).join('\n');
             break;
 
         case 'semester':
