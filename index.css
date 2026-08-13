@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-dark: var(--primary-dark);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-light: var(--accent-light);
+
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+
+  --font-inter: var(--font-inter);
+}
+
+/* Manual definitions to satisfy linter and for direct property usage */
+:root {
+  --primary: #10b981;
+  --primary-hover: #059669;
+  --primary-dark: #002c20;
+  --accent-light: #fefce8;
+  --accent: #eab308;
+  --accent-hover: #ca8a04;
+  --surface: #011310;
+  --surface-muted: #17382f33;
+  --font-inter: "Inter", sans-serif;
+}
+
+.bg-surface {
+  background-color: var(--surface);
+}
+
+.text-accent-light {
+  color: var(--accent-light);
+}
+
+.bg-surface-muted {
+  background-color: var(--surface-muted);
+}
+
+.border-primary-dark {
+  border-color: var(--primary-dark);
+}
+
+.bg-primary {
+  background-color: var(--primary);
+}
+
+.bg-primary-hover:hover {
+  background-color: var(--primary-hover);
+}
+
+@layer base {
+  body {
+    background-color: var(--surface);
+    color: var(--accent-light);
+    @apply antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    background-color: var(--primary);
+    color: white;
+    transition-property: all;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 150ms;
+    @apply px-4 py-2 rounded-md font-bold;
+  }
+
+  .btn-primary:hover {
+    background-color: var(--primary-hover);
+  }
+
+  .card-layout {
+    background-color: var(--surface-muted);
+    border-width: 2px;
+    border-color: var(--primary-dark);
+    @apply p-4 rounded-md;
+  }
+
+  .input-field {
+    @apply w-full rounded-lg px-4 py-3 outline-none transition-all;
+    background-color: var(--surface-muted);
+    border-width: 2px;
+    border-color: var(--primary-dark);
+    color: var(--accent-light);
+  }
+
+  .input-field:focus {
+    border-color: var(--color-accent);
+  }
+}
+
+option {
+  @apply bg-surface-muted text-accent-light hover:bg-surface;
+}
+
+select,
+input,
+textarea {
+  @apply bg-surface flex-1 border-2 border-accent/40 rounded-md p-2 text-xs text-accent-light focus:border-accent outline-none;
+}
+
+.container-destacado {
+  @apply bg-transparent p-2 rounded-md border-2 border-accent-light relative overflow-hidden hover:border-white transition-colors;
+}
+
+.container-padrao {
+  @apply border-2 bg-surface-muted border-primary-dark rounded-md p-2 flex flex-col md:flex-row gap-4 items-start md:items-center
+}
+
+.botao-primario {
+  @apply justify-center bg-accent text-surface px-6 py-2 font-bold rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2
+}

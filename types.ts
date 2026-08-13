@@ -7,6 +7,8 @@ export interface Commit {
   date: string;
   repo: string;
   url: string;
+  author?: string; // Nome do autor do commit
+  authorAvatar?: string; // URL do avatar do autor
   scope?: string; // Contexto inferido (ex: 'auth', 'header', 'login')
   branch?: string; // Nome real da branch (ex: Sprint_33)
   context?: string; // Título do PR ou contexto maior de negócio
@@ -140,6 +142,13 @@ export interface UserContext {
   seniority: SeniorityLevel;
   role: RoleType;
   isHRMode?: boolean; // Se true, o 'Role' pode ser ignorado ou usado apenas para contexto tecnico
+}
+
+export type AIProvider = 'deepseek' | 'gemini';
+
+export interface AIConfig {
+  provider: AIProvider;
+  apiKey: string;
 }
 
 export interface CommitFileChange {

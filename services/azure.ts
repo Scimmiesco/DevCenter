@@ -129,21 +129,21 @@ const fetchCommitsViaPRs = async (
   project: string,
   repoId: string,
   targetAuthors: string[],
-  year: number,
+  start: Date,
+  end: Date,
   commonHeaders: HeadersInit
 ): Promise<AzureApiCommitItem[]> => {
 
   const commitsMap = new Map<string, AzureApiCommitItem>();
   const prsUrl = `/azure-api/${org}/${project}/_apis/git/repositories/${repoId}/pullrequests`;
 
-  // 1. Buscar PRs COMPLETADOS no ano.
-  // Como não temos o UUID garantido, buscamos os PRs recentes e filtramos o criador no cliente.
+  // 1. Buscar PRs COMPLETADOS no período.
   const prParams = new URLSearchParams({
     'searchCriteria.status': 'completed',
-    'searchCriteria.minTime': `${year}-01-01T00:00:00Z`,
-    'searchCriteria.maxTime': `${year}-12-31T23:59:59Z`,
+    'searchCriteria.minTime': start.toISOString(),
+    'searchCriteria.maxTime': end.toISOString(),
     'api-version': '7.0',
-    '$top': '1000' // Volume alto para cobrir o ano
+    '$top': '1000'
   });
 
   try {
@@ -212,19 +212,21 @@ const fetchCommitsDirectly = async (
   project: string,
   repoId: string,
   targetAuthors: string[],
-  year: number,
+  start: Date,
+  end: Date,
   commonHeaders: HeadersInit
 ): Promise<AzureApiCommitItem[]> => {
   const commitsUrl = `/azure-api/${org}/${project}/_apis/git/repositories/${repoId}/commits`;
   let allDirectCommits: AzureApiCommitItem[] = [];
 
-  // Azure permite busca por 'author', mas precisa ser exato ou prefixo.
-  // Vamos iterar sobre os aliases fornecidos para garantir cobertura.
+  const fromDate = start.toISOString(); // e.g., 2025-12-01T00:00:00.000Z
+  const toDate = end.toISOString();
+
   const searchPromises = targetAuthors.map(async (alias) => {
     const params = new URLSearchParams({
       'searchCriteria.author': alias,
-      'searchCriteria.fromDate': `${year}-01-01T00:00:00Z`,
-      'searchCriteria.toDate': `${year}-12-31T23:59:59Z`,
+      'searchCriteria.fromDate': fromDate,
+      'searchCriteria.toDate': toDate,
       'api-version': '7.0',
       '$top': '500'
     });
@@ -238,7 +240,7 @@ const fetchCommitsDirectly = async (
       comment: c.comment,
       author: c.author,
       remoteUrl: c.remoteUrl,
-      branch: 'Geral', // Commits soltos geralmente perdem o contexto da branch original
+      branch: 'Geral',
       context: undefined
     }));
   });
@@ -252,8 +254,9 @@ const fetchCommitsDirectly = async (
 // --- ORQUESTRADOR ---
 export const fetchAzureCommits = async (
   repoUrl: string,
-  aliases: string[], // Equivalente à config de identidade simplificada
-  year: number,
+  aliases: string[],
+  start: Date,
+  end: Date,
   token: string
 ): Promise<AzureApiCommitItem[]> => {
   const config = parseAzureUrl(repoUrl);
@@ -266,10 +269,10 @@ export const fetchAzureCommits = async (
   };
 
   // 1. Buscar via PRs (Alta qualidade de dados, prioridade)
-  const prCommits = await fetchCommitsViaPRs(org, project, repo, aliases, year, headers);
+  const prCommits = await fetchCommitsViaPRs(org, project, repo, aliases, start, end, headers);
 
   // 2. Buscar Direto (Fallback para commits orfãos)
-  const directCommits = await fetchCommitsDirectly(org, project, repo, aliases, year, headers);
+  const directCommits = await fetchCommitsDirectly(org, project, repo, aliases, start, end, headers);
 
   // 3. Unificar com Map para remover duplicatas
   // A ordem de inserção importa: inserimos os diretos primeiro, depois os de PR.
@@ -345,6 +348,9 @@ const fetchProjects = async (org: string, token: string): Promise<AzureProject[]
 
   try {
     const res = await fetch(url, { headers });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Acesso negado (${res.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
     if (!res.ok) throw new Error(`Failed to fetch projects: ${res.statusText}`);
     const data = await res.json();
     return (data.value || []).map((p: any) => ({
@@ -352,9 +358,9 @@ const fetchProjects = async (org: string, token: string): Promise<AzureProject[]
       name: p.name,
       url: p.url
     }));
-  } catch (e) {
+  } catch (e: any) {
     console.error(`[Azure Global] Error fetching projects for ${org}`, e);
-    return [];
+    throw e; // Bubble up so the login fails
   }
 };
 
@@ -364,6 +370,9 @@ const fetchRepositories = async (org: string, project: string, token: string): P
 
   try {
     const res = await fetch(url, { headers });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Acesso negado (${res.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
     if (!res.ok) return []; // Alguns projetos podem não ter repos configurados
     const data = await res.json();
     return (data.value || []).map((r: any) => ({
@@ -375,57 +384,213 @@ const fetchRepositories = async (org: string, project: string, token: string): P
         name: r.project.name
       }
     }));
-  } catch (e) {
+  } catch (e: any) {
     console.warn(`[Azure Global] Error fetching repos for project ${project}`, e);
-    return [];
+    throw e; // Bubble up to fail the entire discovery if auth fails
   }
 };
 
-export const fetchAllOrganizationCommits = async (
+// --- REFACTORED: SPLIT DISCOVERY & FETCH ---
+
+export const discoverRepositories = async (
   org: string,
+  token: string
+): Promise<AzureRepository[]> => {
+  console.log(`🚀 [Azure Service] Discovering Repositories for: ${org}`);
+  try {
+    const projects = await fetchProjects(org, token);
+    console.log(`📂 Found ${projects.length} projects.`);
+
+    let allRepos: AzureRepository[] = [];
+    for (const project of projects) {
+      const repos = await fetchRepositories(org, project.name, token);
+      allRepos.push(...repos);
+    }
+    console.log(`📚 Found ${allRepos.length} repositories.`);
+    return allRepos;
+  } catch (error) {
+    console.error("Discovery Failed:", error);
+    throw error;
+  }
+};
+
+export const fetchCommitsForRepos = async (
+  org: string,
+  repos: AzureRepository[],
   aliases: string[],
-  year: number,
+  start: Date,
+  end: Date,
   token: string
 ): Promise<AzureApiCommitItem[]> => {
-  console.log(`🚀 [Azure Global] Starting Global Fetch for Organization: ${org}`);
-  const projects = await fetchProjects(org, token);
-  console.log(`📂 [Azure Global] Found ${projects.length} projects: ${projects.map(p => p.name).join(', ')}`);
+  console.log(`⚡ [Azure Service] Fetching commits for ${repos.length} selected repos.`);
 
-  let allRepos: AzureRepository[] = [];
-  for (const project of projects) {
-    const repos = await fetchRepositories(org, project.name, token);
-    allRepos.push(...repos);
-  }
-  console.log(`📚 [Azure Global] Found ${allRepos.length} repositories total.`);
-
-  // Processar repositórios em paralelo (com limite de concorrência se necessário, mas aqui vamos de 5 em 5)
-  const allCommitsMap = new Map<string, AzureApiCommitItem>();
+  // Process in batches
   const CHUNK_SIZE = 5;
+  const allCommitsMap = new Map<string, AzureApiCommitItem>();
 
-  for (let i = 0; i < allRepos.length; i += CHUNK_SIZE) {
-    const chunk = allRepos.slice(i, i + CHUNK_SIZE);
+  for (let i = 0; i < repos.length; i += CHUNK_SIZE) {
+    const chunk = repos.slice(i, i + CHUNK_SIZE);
 
     const results = await Promise.all(chunk.map(async (repo) => {
       try {
-        // Reutilizamos a lógica existente que já combina estratégias PR + Direct
-        // Precisamos construir a URL "SSH style" ou "HTTPS style" que o parseAzureUrl espera, ou adaptar a função.
-        // O `fetchAzureCommits` espera uma URL de repo. Vamos construir:
+        // Construct PROXY URL for the internal fetcher
         const repoUrl = `/azure-api/${org}/${repo.project.name}/_git/${repo.name}`;
-        console.log(`Still processing ${repo.name}...`);
-
-        return await fetchAzureCommits(repoUrl, aliases, year, token);
+        return await fetchAzureCommits(repoUrl, aliases, start, end, token);
       } catch (e) {
-        console.warn(`[Azure Global] Failed to process repo ${repo.name}`, e);
+        console.warn(`[Azure Service] Failed to fetch for ${repo.name}`, e);
         return [];
       }
     }));
 
     results.flat().forEach(commit => {
-      // Usamos Map para garantir unicidade global pelo ID do commit
       allCommitsMap.set(commit.commitId, commit);
     });
   }
 
-  console.log(`✅ [Azure Global] Finished. Total Unique Commits found: ${allCommitsMap.size}`);
-  return Array.from(allCommitsMap.values());
+  const finalCommits = Array.from(allCommitsMap.values());
+  console.log(`✅ [Azure Service] Total Unique Commits: ${finalCommits.length}`);
+  return finalCommits;
+};
+
+
+// --- TASK GENERATOR HELPERS ---
+
+export const fetchAreaPaths = async (
+  org: string,
+  project: string,
+  token: string
+): Promise<string[]> => {
+  const url = `/azure-api/${org}/${project}/_apis/wit/classificationnodes/areas?$depth=5&api-version=7.0`;
+  const headers = { 'Authorization': 'Basic ' + btoa(':' + token) };
+
+  try {
+    const res = await fetch(url, { headers });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Acesso negado (${res.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
+    if (!res.ok) throw new Error(`Failed to fetch area paths: ${res.statusText}`);
+
+    const data = await res.json();
+    const paths: string[] = [];
+
+    const traverse = (node: any, currentPath: string) => {
+      const fullPath = currentPath ? `${currentPath}\\${node.name}` : node.name;
+      paths.push(fullPath);
+      if (node.children) {
+        node.children.forEach((child: any) => traverse(child, fullPath));
+      }
+    };
+
+    if (data.value) {
+      data.value.forEach((node: any) => traverse(node, data.name)); // Adjust root
+    } else if (data.name) {
+      traverse(data, "");
+    }
+
+    // Filter usually relevant paths if needed, or return all
+    return paths;
+  } catch (e) {
+    console.error(`[Azure Service] Error fetching area paths for ${project}`, e);
+    throw e;
+  }
+};
+
+export const fetchRecentCommitsForRepo = async (
+  org: string,
+  project: string,
+  repoId: string,
+  token: string,
+  skip: number = 0,
+  take: number = 20,
+  author?: string
+): Promise<any[]> => {
+  let url = `/azure-api/${org}/${project}/_apis/git/repositories/${repoId}/commits?$skip=${skip}&$top=${take}&api-version=7.0`;
+
+  if (author) {
+    url += `&searchCriteria.author=${encodeURIComponent(author)}`;
+  }
+
+  const headers = { Authorization: "Basic " + btoa(":" + token) };
+
+  try {
+    const res = await fetch(url, { headers });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Acesso negado (${res.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
+    if (!res.ok) throw new Error(`Failed to fetch commits: ${res.statusText}`);
+    const data = await res.json();
+    return (data.value || []).map((c: any) => ({
+      commitId: c.commitId,
+      comment: c.comment,
+      author: c.author.name,
+      authorAvatar: c.author.imageUrl, // Assuming Azure provides this sometimes, or we use gravatar
+      date: c.author.date,
+    }));
+  } catch (e) {
+    console.error(`[Azure Service] Error fetching recent commits`, e);
+    throw e;
+  }
+};
+
+export const fetchWorkItemsByType = async (
+  org: string,
+  project: string,
+  workItemSelected: string,
+  token: string
+): Promise<{ id: string; title: string }[]> => {
+  const url = `/azure-api/${org}/${project}/_apis/wit/wiql?api-version=7.0`;
+  const headers = {
+    Authorization: "Basic " + btoa(":" + token),
+    "Content-Type": "application/json",
+  };
+
+  const query = `
+    SELECT [System.Id], [System.Title]
+    FROM WorkItems
+    WHERE [System.TeamProject] = '${project}'
+      AND [System.WorkItemType] = '${workItemSelected}'
+      AND [System.State] <> 'Closed'
+      AND [System.State] <> 'Removed'
+    ORDER BY [System.ChangedDate] DESC
+  `;
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query }),
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Acesso negado (${res.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
+    if (!res.ok) throw new Error(`Failed to fetch work items: ${res.statusText}`);
+
+    const data = await res.json();
+    const workItems = data.workItems || [];
+
+    if (workItems.length === 0) return [];
+
+    // Fetch details (titles) for the IDs found
+    // Limiting to 50 to avoid huge requests
+    const ids = workItems.slice(0, 50).map((wi: any) => wi.id);
+    const detailsUrl = `/azure-api/${org}/${project}/_apis/wit/workitems?ids=${ids.join(
+      ","
+    )}&fields=System.Id,System.Title&api-version=7.0`;
+
+    const detailsRes = await fetch(detailsUrl, { headers });
+    if (detailsRes.status === 401 || detailsRes.status === 403) {
+      throw new Error(`Acesso negado (${detailsRes.status}): O Token do Azure é inválido ou expirou. Verifique suas credenciais.`);
+    }
+    if (!detailsRes.ok) return [];
+
+    const detailsData = await detailsRes.json();
+    return (detailsData.value || []).map((wi: any) => ({
+      id: String(wi.id),
+      title: wi.fields["System.Title"],
+    }));
+  } catch (e) {
+    console.error(`[Azure Service] Error fetching work items of type ${workItemSelected}`, e);
+    throw e;
+  }
 };
