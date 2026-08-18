@@ -33,9 +33,9 @@ const InputForm: React.FC<InputFormProps> = ({ onSubmit, loading }) => {
 
   const [orgName, setOrgName] = useState(() => {
     try {
-      return localStorage.getItem('devcenter_last_org') || 'InfortechMS';
+      return localStorage.getItem('devcenter_last_org') || '';
     } catch {
-      return 'InfortechMS';
+      return '';
     }
   });
 
@@ -57,6 +57,15 @@ const InputForm: React.FC<InputFormProps> = ({ onSubmit, loading }) => {
     setSavedIdentities(updated);
     try {
       localStorage.setItem('devcenter_saved_identities', JSON.stringify(updated));
+    } catch {}
+  };
+
+  const removeSavedOrg = (orgToRemove: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = savedOrgs.filter(o => o !== orgToRemove);
+    setSavedOrgs(updated);
+    try {
+      localStorage.setItem('devcenter_saved_orgs', JSON.stringify(updated));
     } catch {}
   };
 
@@ -179,6 +188,35 @@ const InputForm: React.FC<InputFormProps> = ({ onSubmit, loading }) => {
                   ))}
                 </datalist>
               </div>
+
+              {savedOrgs.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-[11px] font-semibold text-accent-light/60">Salvas:</span>
+                  {savedOrgs.map((org, idx) => (
+                    <span
+                      key={idx}
+                      onClick={() => setOrgName(org)}
+                      className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full cursor-pointer transition-all border ${
+                        orgName === org
+                          ? 'bg-accent/25 border-accent text-accent-light font-medium shadow-sm'
+                          : 'bg-gray-900/90 border-gray-800 text-accent-light/80 hover:border-accent/50 hover:text-accent-light'
+                      }`}
+                      title="Clique para selecionar"
+                    >
+                      <span>{org}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => removeSavedOrg(org, e)}
+                        className="hover:text-red-400 text-accent-light/50 p-0.5 rounded-full hover:bg-gray-800 transition-colors"
+                        title="Remover do histórico"
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <p className="text-xs text-pretty text-accent-light/75">O sistema irá buscar o trabalho em <strong className='text-accent-light'>todos</strong> os projetos e repositórios desta organização.</p>
             </div>
 
