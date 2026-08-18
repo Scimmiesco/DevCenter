@@ -1,619 +1,678 @@
-import React, { useState, useEffect } from 'react';
-import { Provider, UserContext } from '../types';
-import { GoogleGenAI } from "@google/genai";
-import { Download, Play, Plus, Loader2, Save, Trash2, Search, RotateCcw, Wand2, FileText, CheckCircle2, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect } from "react";
+import { Provider, UserContext, AzureRepository, AIConfig } from "../types";
+import { fetchAreaPaths, fetchRecentCommitsForRepo, fetchWorkItemsByType } from "../services/azure";
+import {
+  fetchGitHubCommitDiff,
+  fetchAzureCommitDiff,
+  refineTaskWithAI,
+} from "../services/taskGenerator";
+import { Task, KNOWLEDGE_BASE } from "./TaskWizard/types";
+import { WizardProgress } from "./TaskWizard/WizardProgress";
+import { Step1Context } from "./TaskWizard/Step1Context";
+import { Step2Code } from "./TaskWizard/Step2Code";
+import { Step3Review } from "./TaskWizard/Step3Review";
 
 interface TaskGeneratorProps {
-    provider: Provider;
-    token?: string;
-    username: string;
-    userContext: UserContext;
+  provider: Provider;
+  token?: string;
+  username: string;
+  userContext: UserContext;
+  azureConfig?: { org: string; token: string; aliases: string[] } | null;
+  selectedRepos?: AzureRepository[];
+  aiConfig: AIConfig;
 }
 
-// --- INTEFACES ---
-interface Task {
-    taskId: string;
-    customTitle: string;
-    coherentDescription: string;
-    complexity: 'baixa' | 'media' | 'alta' | 'unica';
-    ustPoints: number;
-    estimateMade: number;
-    source: string;
-    kbIndex: number;
-}
+const TaskGenerator: React.FC<TaskGeneratorProps> = ({
+  provider,
+  token,
+  username,
+  userContext,
+  azureConfig,
+  selectedRepos,
+  aiConfig,
+}) => {
+  // -- STATE --
+  const [config, setConfig] = useState({
+    assignedTo: username || "",
+    iterationPath: "",
+    areaPath: "",
+    ghRepo: "",
+    ghCommit: "",
+    azUrl: "",
+    azCommit: "",
+    contractItem: "",
+    azToken: token || "",
+  });
 
-interface RepoMeta {
-    org?: string;
-    proj?: string;
-    repo?: string;
-}
+  const [selectedRepoId, setSelectedRepoId] = useState<string>("");
+  const [reloadTrigger, setReloadTrigger] = useState(0);
+  const [areaPaths, setAreaPaths] = useState<string[]>([]);
+  const [contractItems, setContractItems] = useState<{ id: string; title: string }[]>([]);
+  const [recentCommits, setRecentCommits] = useState<any[]>([]);
+  const [selectedCommitIds, setSelectedCommitIds] = useState<string[]>([]);
 
-// --- KNOWLEDGE BASE ---
-// Mapeamento estático baseado no user request
-const KNOWLEDGE_BASE = [
-    { id: "10", name: "Análise de Sistema Legado", complexities: { baixa: 3, media: 9, alta: 15 } },
-    { id: "65", name: "Supervisão técnica (Codigo/Analise/Auxilio)", complexities: { unica: 10 } },
-    { id: "17", name: "Implementação de novo Recurso (backend ou frontend)", complexities: { baixa: 8, media: 24, alta: 40 } },
-    { id: "25", name: "Execução de Testes Funcionais (Manuais)", complexities: { unica: 5 } },
-    { id: "38", name: "Elaboração de script", complexities: { unica: 5 } },
-    { id: "14", name: "Implementação de Funcionalidade Relatório", complexities: { baixa: 11, media: 33, alta: 55 } },
-    { id: "36", name: "Executar Merge em caso de conflitos", complexities: { unica: 1 } },
-    { id: "34", name: "Implantação (Deployment) de aplicação", complexities: { unica: 1 } },
-];
+  const [descInput, setDescInput] = useState("");
+  const [diffInput, setDiffInput] = useState("");
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<{
+    msg: string;
+    type: "success" | "error" | "neutral";
+  } | null>(null);
+  const [loadingAi, setLoadingAi] = useState(false);
+  const [viewConfig, setViewConfig] = useState(true);
+  const [filterAuthor, setFilterAuthor] = useState("");
 
-const TaskGenerator: React.FC<TaskGeneratorProps> = ({ provider, token, username, userContext }) => {
-    // --- STATE ---
-    const [config, setConfig] = useState({
-        assignedTo: username || '',
-        iterationPath: '',
-        areaPath: '',
-        ghRepo: '',
-        ghCommit: '',
-        azUrl: '',
-        azCommit: '',
-        azToken: token || ''
+  const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+
+  const cancelAiProcessing = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    const load = (key: string) => localStorage.getItem("tg_" + key) || "";
+    const savedArea = load("areaPath");
+    const savedContract = load("contractItem");
+    setConfig((prev) => ({
+      ...prev,
+      assignedTo: load("assignedTo") || prev.assignedTo,
+      iterationPath: load("iterationPath"),
+      areaPath: (!savedArea || savedArea === "teste" || savedArea === "test") ? "SPF-SIAFIC\\SPF Fábrica" : savedArea,
+      ghRepo: load("ghRepo"),
+      azUrl: load("azUrl"),
+      contractItem: (!savedContract || savedContract === "Item" || savedContract === "item") ? "Item 2" : savedContract,
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (selectedRepos && selectedRepos.length > 0 && !selectedRepoId) {
+      setSelectedRepoId(selectedRepos[0].id);
+    }
+  }, [selectedRepos]);
+
+  useEffect(() => {
+    if (!selectedRepoId || !azureConfig || !selectedRepos) return;
+
+    const repo = selectedRepos.find((r) => r.id === selectedRepoId);
+    if (!repo) return;
+
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        const paths = await fetchAreaPaths(
+          azureConfig.org,
+          repo.project.name,
+          azureConfig.token
+        );
+        setAreaPaths(paths);
+
+        const commits = await fetchRecentCommitsForRepo(
+          azureConfig.org,
+          repo.project.name,
+          repo.id,
+          azureConfig.token
+        );
+        setRecentCommits(commits);
+
+        const items = await fetchWorkItemsByType(
+          azureConfig.org,
+          repo.project.name,
+          'Item Contrato',
+          azureConfig.token
+        );
+        setContractItems(items);
+        setStatusMsg(null);
+      } catch (e: any) {
+        console.error(e);
+        setStatusMsg({ msg: e.message || "Falha de conexão com a API do Azure.", type: "error" });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, [selectedRepoId, azureConfig, selectedRepos, reloadTrigger]);
+
+  const saveConfig = () => {
+    Object.entries(config).forEach(([k, v]) => {
+      if (v && k !== "azToken" && k !== "ghCommit" && k !== "azCommit") {
+        localStorage.setItem("tg_" + k, v as string);
+      }
+    });
+  };
+
+  const handleCommitSelect = (commitId: string) => {
+    let newIds: string[] = [];
+    setSelectedCommitIds((prev) => {
+      newIds = prev.includes(commitId) ? prev.filter((id) => id !== commitId) : [...prev, commitId];
+      return newIds;
     });
 
-    const [descInput, setDescInput] = useState('');
-    const [diffInput, setDiffInput] = useState('');
-    const [tasks, setTasks] = useState<Task[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [statusMsg, setStatusMsg] = useState<{ msg: string; type: 'success' | 'error' | 'neutral' } | null>(null);
-    const [loadingAi, setLoadingAi] = useState(false);
-    const [viewConfig, setViewConfig] = useState(true);
+    if (!selectedRepos || !azureConfig) return;
 
-    // Load Config on Mount
-    useEffect(() => {
-        const load = (key: string) => localStorage.getItem('tg_' + key) || '';
-        setConfig(prev => ({
-            ...prev,
-            assignedTo: load('assignedTo') || prev.assignedTo,
-            iterationPath: load('iterationPath'),
-            areaPath: load('areaPath'),
-            ghRepo: load('ghRepo'),
-            azUrl: load('azUrl'),
-            // Token de API geralmente não salvamos ou salvamos com cuidado. 
-            // O user snippet salvava, então manteremos a consistencia se desejado,
-            // mas aqui optei por usar o props 'token' como default se disponivel.
-        }));
-    }, []);
+    const repo = selectedRepos.find((r) => r.id === selectedRepoId);
+    if (!repo) return;
 
-    const saveConfig = () => {
-        Object.entries(config).forEach(([k, v]) => {
-            if (v && k !== 'azToken' && k !== 'ghCommit' && k !== 'azCommit') { // Avoid saving specifics
-                localStorage.setItem('tg_' + k, v);
-            }
-        });
-    };
+    const cloneUrl = `https://dev.azure.com/${azureConfig.org}/${repo.project.name}/_git/${repo.name}`;
 
-    // --- REPO API ---
-    const parseAzureUrl = (url: string): RepoMeta | null => {
-        url = url.trim();
-        const sshMatch = url.match(/git@ssh\.dev\.azure\.com:v3\/([^\/]+)\/([^\/]+)\/([^\/]+)/);
-        if (sshMatch) return { org: sshMatch[1], proj: sshMatch[2], repo: sshMatch[3] };
+    setTimeout(() => {
+      setConfig((prev) => ({
+        ...prev,
+        azUrl: cloneUrl,
+        azCommit: newIds.join(","),
+      }));
+    }, 0);
+  };
 
-        const httpsMatch = url.match(/dev\.azure\.com\/([^\/]+)\/([^\/]+)\/_git\/([^?#\/]+)/);
-        if (httpsMatch) return { org: httpsMatch[1], proj: httpsMatch[2], repo: httpsMatch[3] };
+  const fetchGitHub = async () => {
+    if (!config.ghRepo || !config.ghCommit)
+      return setStatusMsg({ msg: "Preencha Repo e Commit", type: "error" });
+    setLoading(true);
+    setStatusMsg({ msg: "Buscando GitHub...", type: "neutral" });
+    try {
+      const data = await fetchGitHubCommitDiff(
+        config.ghRepo,
+        config.ghCommit,
+        config.azToken
+      );
 
-        const vsMatch = url.match(/([^\.]+)\.visualstudio\.com\/([^\/]+)\/_git\/([^?#\/]+)/);
-        if (vsMatch) return { org: vsMatch[1], proj: vsMatch[2], repo: vsMatch[3] };
+      setDiffInput(data.diff);
+      setDescInput(data.description);
+      setStatusMsg({ msg: "Diff carregado via GitHub", type: "success" });
+      saveConfig();
+    } catch (e: any) {
+      setStatusMsg({ msg: e.message, type: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
 
-        return null;
-    };
+  const fetchAzure = async () => {
+    if (!config.azUrl || selectedCommitIds.length === 0 || !config.azToken)
+      return setStatusMsg({
+        msg: "Preencha URL, selecione os Commits e Token",
+        type: "error",
+      });
 
-    const fetchGitHub = async () => {
-        if (!config.ghRepo || !config.ghCommit) return setStatusMsg({ msg: "Preencha Repo e Commit", type: 'error' });
-        setLoading(true); setStatusMsg({ msg: "Buscando GitHub...", type: 'neutral' });
-        try {
-            const headers: any = {};
-            // Use provided token logic if needed, currently assumes public or implicit
-            const res = await fetch(`https://api.github.com/repos/${config.ghRepo}/commits/${config.ghCommit}`, { headers });
-            if (!res.ok) throw new Error("Erro GitHub API");
-            const data = await res.json();
+    setLoading(true);
+    setStatusMsg({ msg: "Buscando Diff(s) no Azure...", type: "neutral" });
+    try {
+      let fullDiff = "";
+      let fullDesc = "";
 
-            let diff = `[GitHub Commit] ${data.commit.message}\nFiles:\n`;
-            if (data.files) data.files.forEach((f: any) => diff += `- ${f.filename} (${f.status})\n`);
-            setDiffInput(diff);
-            setDescInput(data.commit.message);
-            setStatusMsg({ msg: "Diff carregado via GitHub", type: 'success' });
-            saveConfig();
-        } catch (e: any) {
-            setStatusMsg({ msg: e.message, type: 'error' });
-        } finally { setLoading(false); }
-    };
+      for (const commitId of selectedCommitIds) {
+        const data = await fetchAzureCommitDiff(
+          config.azUrl,
+          commitId,
+          config.azToken
+        );
+        fullDiff += data.diff + "\n\n";
+        fullDesc += data.description + "\n\n";
+      }
 
-    const fetchAzure = async () => {
-        if (!config.azUrl || !config.azCommit || !config.azToken) return setStatusMsg({ msg: "Preencha URL, Commit e Token", type: 'error' });
-        const meta = parseAzureUrl(config.azUrl);
-        if (!meta) return setStatusMsg({ msg: "URL Azure inválida", type: 'error' });
+      setDiffInput(fullDiff.trim());
+      setDescInput(fullDesc.trim());
+      setStatusMsg({ msg: `Diff de ${selectedCommitIds.length} commit(s) carregado via Azure`, type: "success" });
+      saveConfig();
+    } catch (e: any) {
+      setStatusMsg({ msg: e.message, type: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
 
-        setLoading(true); setStatusMsg({ msg: "Buscando Azure...", type: 'neutral' });
-        try {
-            const auth = btoa(":" + config.azToken);
-            const url = `https://dev.azure.com/${meta.org}/${meta.proj}/_apis/git/repositories/${meta.repo}/commits/${config.azCommit}/changes?api-version=7.0`;
-            const res = await fetch(url, { headers: { 'Authorization': `Basic ${auth}` } });
+  const classifyComplexity = (
+    filesCount: number,
+    text: string,
+    domain: string
+  ): { complexity: "baixa" | "media" | "alta" | "unica"; taskId: string } => {
+    const textLower = text.toLowerCase();
 
-            if (!res.ok) throw new Error(`Erro ${res.status}: Verifique token/permissões`);
+    if (textLower.includes("merge"))
+      return { taskId: "36", complexity: "unica" };
+    if (textLower.includes("deploy") || textLower.includes("implantação"))
+      return { taskId: "34", complexity: "unica" };
+    if (textLower.includes("relatorio") || textLower.includes("relatório")) {
+      let comp: "baixa" | "media" | "alta" = "baixa";
+      if (filesCount > 5) comp = "media";
+      if (filesCount > 10) comp = "alta";
+      return { taskId: "14", complexity: comp };
+    }
+    if (textLower.includes("script") || domain === "Database") {
+      if (textLower.includes("criar") || textLower.includes("create"))
+        return { taskId: "38", complexity: "unica" };
+      return { taskId: "10", complexity: "baixa" };
+    }
+    if (textLower.includes("teste") || textLower.includes("testes") || domain === "Test") return { taskId: "25", complexity: "unica" };
+    if (domain === "Meeting") return { taskId: "65", complexity: "unica" };
 
-            const data = await res.json();
-            let diff = `[Azure Commit] ${config.azCommit}\nFiles:\n`;
-            if (data.changes) data.changes.forEach((c: any) => diff += `- [${c.changeType}] ${c.item.path}\n`);
+    let score = 1;
+    if (filesCount > 10) score = 3;
+    else if (filesCount >= 4) score = 2;
 
-            // Try fetching message
-            try {
-                const msgUrl = `https://dev.azure.com/${meta.org}/${meta.proj}/_apis/git/repositories/${meta.repo}/commits/${config.azCommit}?api-version=7.0`;
-                const msgRes = await fetch(msgUrl, { headers: { 'Authorization': `Basic ${auth}` } });
-                if (msgRes.ok) {
-                    const msgData = await msgRes.json();
-                    setDescInput(msgData.comment);
-                    diff = `Msg: ${msgData.comment}\n` + diff;
-                }
-            } catch (ign) { }
+    if (
+      textLower.match(
+        /(complexo|grande|refatoração total|migração|arquitetura|integração)/
+      )
+    )
+      score = Math.max(score, 3);
+    else if (
+      textLower.match(
+        /(novo|nova|criar|implementar|feature|recurso|desenvolver)/
+      )
+    )
+      score = Math.max(score, 2);
 
-            setDiffInput(diff);
-            setStatusMsg({ msg: "Diff carregado via Azure", type: 'success' });
-            saveConfig();
-        } catch (e: any) {
-            setStatusMsg({ msg: e.message, type: 'error' });
-        } finally { setLoading(false); }
-    };
+    let complexity: "baixa" | "media" | "alta" = "baixa";
+    if (score >= 3) complexity = "alta";
+    else if (score === 2) complexity = "media";
 
-    // --- HEURISTIC ENGINE ---
-    const classifyComplexity = (filesCount: number, text: string, domain: string): { complexity: 'baixa' | 'media' | 'alta' | 'unica', taskId: string } => {
-        // Regras Portadas
-        const textLower = text.toLowerCase();
+    return { taskId: "17", complexity };
+  };
 
-        // 1. Task ID Logic
-        if (textLower.includes("merge")) return { taskId: "36", complexity: "unica" };
-        if (textLower.includes("deploy") || textLower.includes("implantação")) return { taskId: "34", complexity: "unica" };
-        if (textLower.includes("relatorio") || textLower.includes("relatório")) {
-            // Relatorio Rules
-            let comp: 'baixa' | 'media' | 'alta' = 'baixa';
-            if (filesCount > 5) comp = 'media';
-            if (filesCount > 10) comp = 'alta';
-            return { taskId: "14", complexity: comp };
-        }
-        if (textLower.includes("script") || domain === 'Database') {
-            if (textLower.includes("criar") || textLower.includes("create")) return { taskId: "38", complexity: "unica" };
-            // analise
-            return { taskId: "10", complexity: "baixa" };
-        }
-        if (domain === 'Test') return { taskId: "25", complexity: "unica" };
-        if (domain === 'Meeting') return { taskId: "65", complexity: "unica" };
-
-        // Default: Implementação (17)
-        let score = 1;
-        if (filesCount > 10) score = 3;
-        else if (filesCount >= 4) score = 2;
-
-        if (textLower.match(/(complexo|grande|refatoração total|migração|arquitetura|integração)/)) score = Math.max(score, 3);
-        else if (textLower.match(/(novo|nova|criar|implementar|feature|recurso|desenvolver)/)) score = Math.max(score, 2);
-
-        let complexity: 'baixa' | 'media' | 'alta' = 'baixa';
-        if (score >= 3) complexity = 'alta';
-        else if (score === 2) complexity = 'media';
-
-        return { taskId: "17", complexity };
-    };
-
-    const processHeuristic = () => {
-        saveConfig();
-        if (!descInput && !diffInput) return setStatusMsg({ msg: "Sem dados para processar", type: 'error' });
-
-        const newTasks: Task[] = [];
-
-        // Split functionality based on diff files
-        const files = diffInput.match(/[-*] (\[.*?\])?\s?([a-zA-Z0-9_/\\.-]+)/g) || [''];
-
-        // Group by Domain
-        const domains: Record<string, number> = { Frontend: 0, Backend: 0, Database: 0, Test: 0, Config: 0 };
-
-        files.forEach(f => {
-            const path = f.toLowerCase();
-            if (path.includes('.tsx') || path.includes('.css') || path.includes('.html') || path.includes('clientapp')) domains.Frontend++;
-            else if (path.includes('.cs') || path.includes('controller') || path.includes('service') || path.includes('api')) domains.Backend++;
-            else if (path.includes('.sql')) domains.Database++;
-            else if (path.includes('test') || path.includes('spec')) domains.Test++;
-            else domains.Config++;
-        });
-
-        const activeDomains = Object.entries(domains).filter(([_, count]) => count > 0);
-
-        // If no file heuristic (manual entry usually), treat as single generic
-        if (activeDomains.length === 0) activeDomains.push(['Geral', 1]);
-
-        activeDomains.forEach(([domain, count]) => {
-            const rules = classifyComplexity(count, descInput, domain);
-
-            // Find KB
-            let kbIndex = KNOWLEDGE_BASE.findIndex(k => k.id === rules.taskId);
-            if (kbIndex === -1) kbIndex = 2; // Default to Impl
-
-            const kb = KNOWLEDGE_BASE[kbIndex];
-            // Safe access complexity points
-            const points = (kb.complexities as any)[rules.complexity] || Object.values(kb.complexities)[0];
-
-            newTasks.push({
-                taskId: kb.id,
-                kbIndex,
-                complexity: rules.complexity,
-                ustPoints: points,
-                estimateMade: 0,
-                customTitle: titleFromDomain(domain, descInput),
-                coherentDescription: descInput || "Alterações realizadas nos arquivos do sistema.",
-                source: "Heurística (Auto)"
-            });
-        });
-
-        setTasks(newTasks);
-        setStatusMsg({ msg: `Gerado: ${newTasks.length} tarefas via regras.`, type: 'success' });
-        setViewConfig(false); // Collapse config to show results
-    };
-
-    const titleFromDomain = (domain: string, desc: string): string => {
-        const cleanDesc = desc.split('\n')[0].substring(0, 50);
-        if (domain === 'Geral') return cleanDesc || "Nova Tarefa";
-        return `${domain} - ${cleanDesc}`;
+  const processHeuristic = () => {
+    saveConfig();
+    if (!config.areaPath) {
+      return setStatusMsg({ msg: "Erro: Area Path é obrigatório.", type: "error" });
+    }
+    if (!config.iterationPath) {
+      return setStatusMsg({ msg: "Erro: Iteration Path é obrigatório.", type: "error" });
+    }
+    if (!config.contractItem) {
+      return setStatusMsg({ msg: "Erro: Item Contrato é obrigatório.", type: "error" });
+    }
+    if (!diffInput && !config.azCommit && !descInput) {
+      return setStatusMsg({ msg: "Erro: Forneça um Diff, selecione um Commit ou preencha a Descrição.", type: "error" });
     }
 
-    // --- AI REFINEMENT ---
-    const refineWithAI = async () => {
-        if (!process.env.API_KEY) return setStatusMsg({ msg: "API Key não configurada no ambiente", type: 'error' });
+    if (config.assignedTo && config.assignedTo.includes(" ")) {
+      const formattedName = config.assignedTo
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, ".");
+      setConfig((prev) => ({ ...prev, assignedTo: formattedName }));
+    }
 
-        setLoadingAi(true);
-        try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const prompt = `
-                Aja como Tech Lead. Quebre o trabalho a seguir em tarefas faturáveis (lista JSON).
-                DESCRIÇÃO: ${descInput}
-                DIFF SUMMARY: ${diffInput.substring(0, 5000)}
-                
-                REGRAS:
-                - Separe Frontend, Backend, Banco de Dados.
-                - JSON array de objetos: { "summary": "titulo curto", "description": "descrição detalhada técnica" }
-            `;
+    const newTasks: Task[] = [];
+    const files = diffInput.match(
+      /[-*] (\[.*?\])?\s?([a-zA-Z0-9_/\\.-]+)/g
+    ) || [""];
 
-
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.0-flash-exp', // Or 'gemini-1.5-flash'
-                contents: prompt,
-            });
-            debugger
-            const responseText = response.text;
-
-            // Parse JSON
-            const jsonMatch = responseText.match(/\[.*\]/s);
-            if (!jsonMatch) throw new Error("IA não retornou JSON válido");
-
-            const aiItems = JSON.parse(jsonMatch[0]);
-
-            // Convert AI items to Heuristic Tasks
-            const convertedTasks = aiItems.map((item: any) => {
-                // Re-run classifier on AI output
-                const rules = classifyComplexity(1, item.summary + " " + item.description, "Geral");
-                let kbIndex = KNOWLEDGE_BASE.findIndex(k => k.id === rules.taskId);
-                if (kbIndex === -1) kbIndex = 2;
-                const kb = KNOWLEDGE_BASE[kbIndex];
-                const points = (kb.complexities as any)[rules.complexity] || Object.values(kb.complexities)[0];
-
-                return {
-                    taskId: kb.id,
-                    kbIndex,
-                    complexity: rules.complexity,
-                    ustPoints: points,
-                    estimateMade: 0,
-                    customTitle: item.summary,
-                    coherentDescription: item.description,
-                    source: "IA Refinada"
-                }
-            });
-
-            setTasks(convertedTasks);
-            setStatusMsg({ msg: "Tarefas refinadas com IA!", type: 'success' });
-
-        } catch (e: any) {
-            setStatusMsg({ msg: "Erro IA: " + e.message, type: 'error' });
-        } finally {
-            setLoadingAi(false);
-        }
+    const domains: Record<string, number> = {
+      Frontend: 0,
+      Backend: 0,
+      Database: 0,
+      Test: 0,
+      Config: 0,
     };
 
+    files.forEach((f) => {
+      const path = f.toLowerCase();
+      if (
+        path.includes(".tsx") ||
+        path.includes(".css") ||
+        path.includes(".html") ||
+        path.includes("clientapp")
+      )
+        domains.Frontend++;
+      else if (
+        path.includes(".cs") ||
+        path.includes("controller") ||
+        path.includes("service") ||
+        path.includes("api")
+      )
+        domains.Backend++;
+      else if (path.includes(".sql")) domains.Database++;
+      else if (path.includes("test") || path.includes("spec")) domains.Test++;
+      else domains.Config++;
+    });
 
-    // --- EXPORT ---
-    const exportCsv = () => {
-        if (tasks.length === 0) return;
-
-        let csv = "ID,Work Item Type,Title,Assigned To,State,ID SPF,Effort,UST,Activity,Complexidade,Area Path,Iteration Path,Description\n";
-
-        const area = config.areaPath || "Area\\Path";
-        // Logic for full iteration path based on snippet
-        let fullIter = config.iterationPath;
-        if (config.areaPath.includes('Refatoração')) fullIter = `SPF-SIAFIC\\Refatoração\\Refatoração - ${config.iterationPath}`;
-        else if (config.areaPath.includes('Fábrica')) fullIter = `SPF-SIAFIC\\SPF Fábrica\\SPF - ${config.iterationPath}`;
-
-        tasks.forEach(t => {
-            const tit = `"${t.customTitle.replace(/"/g, '""')}"`;
-            const desc = `"${t.coherentDescription.replace(/"/g, '""')}"`;
-            let comp = t.complexity === 'unica' ? 'ÚNICA' : t.complexity.toUpperCase();
-
-            csv += `,"Task",${tit},"${config.assignedTo}","To Do","${t.taskId}","${t.estimateMade}","${t.ustPoints}","Development","${comp}","${area}","${fullIter}",${desc}\n`;
-        });
-
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `tasks_${Date.now()}.csv`;
-        link.click();
-    };
-
-
-    // --- UI HELPERS ---
-    const updateTask = (index: number, field: keyof Task, value: any) => {
-        const newTasks = [...tasks];
-        const task = newTasks[index];
-        (task as any)[field] = value;
-
-        // Update derivatives
-        if (field === 'kbIndex') {
-            const kb = KNOWLEDGE_BASE[value];
-            task.taskId = kb.id;
-            // Reset complexity to first available
-            const firstComp = Object.keys(kb.complexities)[0] as any;
-            task.complexity = firstComp;
-            task.ustPoints = (kb.complexities as any)[firstComp];
-        } else if (field === 'complexity') {
-            const kb = KNOWLEDGE_BASE[task.kbIndex];
-            task.ustPoints = (kb.complexities as any)[value] || 0;
-        }
-
-        setTasks(newTasks);
-    };
-
-    const removeTask = (index: number) => {
-        setTasks(tasks.filter((_, i) => i !== index));
-    };
-
-    const badgeColor = (c: string) => {
-        if (c === 'baixa') return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
-        if (c === 'media') return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
-        if (c === 'alta') return 'bg-red-500/20 text-red-400 border-red-500/30';
-        return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
-    };
-
-
-    return (
-        <div className="space-y-6">
-
-            {/* CONFIGURATION PANEL */}
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
-                <button
-                    onClick={() => setViewConfig(!viewConfig)}
-                    className="w-full flex items-center justify-between p-4 bg-slate-950/50 hover:bg-slate-900 transition-colors"
-                >
-                    <h3 className="font-bold text-slate-200 flex items-center gap-2">
-                        <RotateCcw size={16} className="text-emerald-500" /> Configuração & Origem
-                    </h3>
-                    {viewConfig ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                </button>
-
-                {viewConfig && (
-                    <div className="p-6 space-y-6 animate-in slide-in-from-top-2 duration-200">
-                        {/* 1. Global Fields */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div>
-                                <label className="text-xs font-bold uppercase text-slate-500 mb-1 block">Assigned To</label>
-                                <input type="text" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-sm"
-                                    value={config.assignedTo} onChange={e => setConfig({ ...config, assignedTo: e.target.value })} />
-                            </div>
-                            <div>
-                                <label className="text-xs font-bold uppercase text-slate-500 mb-1 block">Iteration Path</label>
-                                <input type="text" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-sm" placeholder="ex: 35"
-                                    value={config.iterationPath} onChange={e => setConfig({ ...config, iterationPath: e.target.value })} />
-                            </div>
-                            <div>
-                                <label className="text-xs font-bold uppercase text-slate-500 mb-1 block">Area Path</label>
-                                <select className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-sm"
-                                    value={config.areaPath} onChange={e => setConfig({ ...config, areaPath: e.target.value })}>
-                                    <option value="">Selecione...</option>
-                                    <option value="SPF-SIAFIC\Refatoração">Refatoração</option>
-                                    <option value="SPF-SIAFIC\SPF Fábrica">Fábrica</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <div className="h-px bg-slate-800 my-4" />
-
-                        {/* 2. Source Selection */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {/* Azure */}
-                            <div className={`p-4 rounded-xl border transition-all ${provider === 'azure' ? 'bg-blue-900/10 border-blue-500/50' : 'bg-slate-950 border-slate-800 opacity-50'}`}>
-                                <h4 className="font-bold text-blue-400 mb-3 flex items-center gap-2">Azure DevOps</h4>
-                                <div className="space-y-3">
-                                    <input type="text" placeholder="URL do Repo (Clone URL)" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs"
-                                        value={config.azUrl} onChange={e => setConfig({ ...config, azUrl: e.target.value })} />
-                                    <div className="flex gap-2">
-                                        <input type="text" placeholder="Commit SHA" className="flex-1 bg-slate-900 border border-slate-700 rounded p-2 text-xs font-mono"
-                                            value={config.azCommit} onChange={e => setConfig({ ...config, azCommit: e.target.value })} />
-                                        <button onClick={fetchAzure} disabled={loading || provider !== 'azure'} className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold disabled:opacity-50">
-                                            {loading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                                        </button>
-                                    </div>
-                                    <input type="password" placeholder="PAT Token (Opcional se já logado)" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs"
-                                        value={config.azToken} onChange={e => setConfig({ ...config, azToken: e.target.value })} />
-                                </div>
-                            </div>
-
-                            {/* GitHub */}
-                            <div className={`p-4 rounded-xl border transition-all ${provider === 'github' ? 'bg-slate-800 border-slate-600' : 'bg-slate-950 border-slate-800 opacity-50'}`}>
-                                <h4 className="font-bold text-slate-300 mb-3 flex items-center gap-2">GitHub</h4>
-                                <div className="space-y-3">
-                                    <input type="text" placeholder="Owner/Repo" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs"
-                                        value={config.ghRepo} onChange={e => setConfig({ ...config, ghRepo: e.target.value })} />
-                                    <div className="flex gap-2">
-                                        <input type="text" placeholder="Commit SHA" className="flex-1 bg-slate-900 border border-slate-700 rounded p-2 text-xs font-mono"
-                                            value={config.ghCommit} onChange={e => setConfig({ ...config, ghCommit: e.target.value })} />
-                                        <button onClick={fetchGitHub} disabled={loading || provider !== 'github'} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs font-bold disabled:opacity-50">
-                                            {loading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Status Message */}
-                        {statusMsg && (
-                            <div className={`p-3 rounded text-xs font-bold flex items-center gap-2 ${statusMsg.type === 'error' ? 'bg-red-500/10 text-red-400' : statusMsg.type === 'success' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
-                                {/* {statusMsg.type === 'loading' && <Loader2 size={12} className="animate-spin" />} */}
-                                {statusMsg.msg}
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {/* INPUT AREA */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-2">
-                    <label className="text-xs font-bold uppercase text-slate-500">Descrição Técnica</label>
-                    <textarea
-                        className="w-full h-32 bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none resize-none"
-                        placeholder="Descreva o que foi feito..."
-                        value={descInput}
-                        onChange={e => setDescInput(e.target.value)}
-                    />
-                </div>
-                <div className="space-y-2">
-                    <label className="text-xs font-bold uppercase text-slate-500">Diff / Arquivos Afetados</label>
-                    <textarea
-                        className="w-full h-32 bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm font-mono text-slate-400 focus:ring-2 focus:ring-blue-500/50 outline-none resize-none"
-                        placeholder="Cole o diff ou lista de arquivos..."
-                        value={diffInput}
-                        onChange={e => setDiffInput(e.target.value)}
-                    />
-                </div>
-            </div>
-
-            {/* ACTION BAR */}
-            <div className="flex items-center gap-4">
-                <button
-                    onClick={processHeuristic}
-                    className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-blue-900/20 active:scale-95 flex items-center justify-center gap-2"
-                >
-                    <Play size={18} /> Gerar Tarefas (Rápido)
-                </button>
-                <button
-                    onClick={refineWithAI}
-                    disabled={loadingAi}
-                    className="px-6 py-3 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 rounded-xl font-bold transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                    {loadingAi ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
-                    IA Magic
-                </button>
-            </div>
-
-            {/* RESULTS AREA */}
-            {tasks.length > 0 && (
-                <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-4">
-                        <h3 className="font-bold text-white flex items-center gap-2">
-                            <CheckCircle2 className="text-emerald-500" size={18} />
-                            Tarefas Geradas <span className="text-xs bg-slate-800 px-2 py-0.5 rounded-full text-slate-400">{tasks.length}</span>
-                        </h3>
-                        <div className="flex gap-2">
-                            <button onClick={() => setTasks([])} className="p-2 text-slate-500 hover:text-red-400 transition-colors"><Trash2 size={16} /></button>
-                            <button onClick={exportCsv} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-emerald-900/20 transition-all">
-                                <FileText size={16} /> Exportar CSV
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="space-y-3">
-                        {tasks.map((task, idx) => (
-                            <div key={idx} className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm hover:border-slate-700 transition-all group">
-                                <div className="flex items-start gap-4">
-                                    <div className="mt-1 p-2 bg-slate-950 rounded text-slate-400 font-mono text-xs border border-slate-800">
-                                        #{task.taskId}
-                                    </div>
-
-                                    <div className="flex-1 space-y-3">
-                                        <div className="flex gap-2">
-                                            <input
-                                                type="text"
-                                                className="flex-1 bg-transparent border-b border-transparent hover:border-slate-700 focus:border-blue-500 outline-none text-white font-semibold placeholder-slate-600 transition-colors"
-                                                value={task.customTitle}
-                                                onChange={e => updateTask(idx, 'customTitle', e.target.value)}
-                                            />
-                                            <span className="text-[10px] uppercase font-bold text-slate-600 tracking-wider self-center">{task.source}</span>
-                                        </div>
-
-                                        <textarea
-                                            className="w-full bg-slate-950/50 rounded p-2 text-sm text-slate-300 outline-none border border-transparent focus:border-slate-700 resize-none"
-                                            rows={2}
-                                            value={task.coherentDescription}
-                                            onChange={e => updateTask(idx, 'coherentDescription', e.target.value)}
-                                        />
-
-                                        <div className="flex flex-wrap items-center gap-4">
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[10px] font-bold uppercase text-slate-500">Categoria</label>
-                                                <select
-                                                    className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-300 outline-none"
-                                                    value={task.kbIndex}
-                                                    onChange={e => updateTask(idx, 'kbIndex', parseInt(e.target.value))}
-                                                >
-                                                    {KNOWLEDGE_BASE.map((k, i) => (
-                                                        <option key={k.id} value={i}>{k.name}</option>
-                                                    ))}
-                                                </select>
-                                            </div>
-
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[10px] font-bold uppercase text-slate-500">Complexidade</label>
-                                                <select
-                                                    className={`bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs outline-none font-bold ${task.complexity === 'alta' ? 'text-red-400' : task.complexity === 'media' ? 'text-yellow-400' : 'text-emerald-400'
-                                                        }`}
-                                                    value={task.complexity}
-                                                    onChange={e => updateTask(idx, 'complexity', e.target.value)}
-                                                >
-                                                    {Object.keys(KNOWLEDGE_BASE[task.kbIndex].complexities).map(c => (
-                                                        <option key={c} value={c}>{c.toUpperCase()}</option>
-                                                    ))}
-                                                </select>
-                                            </div>
-
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[10px] font-bold uppercase text-slate-500">UST</label>
-                                                <div className={`px-2 py-1 rounded text-xs font-mono font-bold border ${badgeColor(task.complexity)}`}>
-                                                    {task.ustPoints}
-                                                </div>
-                                            </div>
-
-                                            <div className="flex flex-col gap-1">
-                                                <label className="text-[10px] font-bold uppercase text-slate-500">Horas</label>
-                                                <input
-                                                    type="number"
-                                                    className="w-16 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-center text-white"
-                                                    value={task.estimateMade}
-                                                    onChange={e => updateTask(idx, 'estimateMade', parseFloat(e.target.value))}
-                                                />
-                                            </div>
-
-                                            <button
-                                                onClick={() => removeTask(idx)}
-                                                className="ml-auto text-slate-600 hover:text-red-400 transition-colors"
-                                            >
-                                                <Trash2 size={14} />
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-        </div>
+    const activeDomains = Object.entries(domains).filter(
+      ([_, count]) => count > 0
     );
+
+    if (activeDomains.length === 0) activeDomains.push(["Geral", 1]);
+
+    activeDomains.forEach(([domain, count]) => {
+      const rules = classifyComplexity(count, descInput, domain);
+      let kbIndex = KNOWLEDGE_BASE.findIndex((k) => k.id === rules.taskId);
+      if (kbIndex === -1) kbIndex = 2;
+
+      const kb = KNOWLEDGE_BASE[kbIndex];
+      const points =
+        (kb.complexities as any)[rules.complexity] ||
+        Object.values(kb.complexities)[0];
+
+      let defaultEstimate = 0.5;
+      if (rules.complexity === "media") defaultEstimate = 1;
+      if (rules.complexity === "alta" || rules.complexity === "unica") defaultEstimate = 2;
+
+      newTasks.push({
+        taskId: kb.id,
+        kbIndex,
+        complexity: rules.complexity as any,
+        ustPoints: points,
+        estimateMade: defaultEstimate,
+        customTitle: titleFromDomain(domain, descInput),
+        coherentDescription:
+          descInput || "Alterações realizadas nos arquivos do sistema.",
+        source: "Heurística (Auto)",
+        relatedCommitId: config.azCommit || config.ghCommit,
+        relatedCommitUrl: (config.azUrl && config.azCommit)
+          ? `${config.azUrl}/commit/${config.azCommit}`
+          : (config.ghRepo && config.ghCommit)
+            ? `https://github.com/${config.ghRepo}/commit/${config.ghCommit}`
+            : undefined,
+        contractItem: config.contractItem,
+      });
+    });
+
+    setTasks(newTasks);
+    setStatusMsg({
+      msg: `Gerado: ${newTasks.length} tarefas via regras.`,
+      type: "success",
+    });
+    setViewConfig(false);
+  };
+
+  const titleFromDomain = (domain: string, desc: string): string => {
+    const cleanDesc = desc.split("\n")[0].substring(0, 50);
+    if (domain === "Geral") return cleanDesc || "Nova Tarefa";
+    return `${domain} - ${cleanDesc}`;
+  };
+
+  const refineWithAI = async () => {
+    if (!config.areaPath) {
+      return setStatusMsg({ msg: "Erro: Area Path é obrigatório.", type: "error" });
+    }
+    if (!config.iterationPath) {
+      return setStatusMsg({ msg: "Erro: Iteration Path é obrigatório.", type: "error" });
+    }
+    if (!config.contractItem) {
+      return setStatusMsg({ msg: "Erro: Item Contrato é obrigatório.", type: "error" });
+    }
+    if (!diffInput && !config.azCommit && !descInput) {
+      return setStatusMsg({ msg: "Erro: Forneça um Diff, selecione um Commit ou preencha a Descrição.", type: "error" });
+    }
+
+    if (config.assignedTo && config.assignedTo.includes(" ")) {
+      const formattedName = config.assignedTo
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, ".");
+      setConfig((prev) => ({ ...prev, assignedTo: formattedName }));
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    setLoadingAi(true);
+    try {
+      const aiItems = await refineTaskWithAI(descInput, diffInput, aiConfig, controller.signal);
+      const convertedTasks = aiItems.map((item: any) => {
+        const rules = classifyComplexity(
+          1,
+          item.summary + " " + item.description,
+          "Geral"
+        );
+        let kbIndex = KNOWLEDGE_BASE.findIndex((k) => k.id === rules.taskId);
+        if (kbIndex === -1) kbIndex = 2;
+        const kb = KNOWLEDGE_BASE[kbIndex];
+        const points =
+          (kb.complexities as any)[rules.complexity] ||
+          Object.values(kb.complexities)[0];
+
+        let defaultEstimate = 0.5;
+        if (rules.complexity === "media") defaultEstimate = 1;
+        if (rules.complexity === "alta" || rules.complexity === "unica") defaultEstimate = 2;
+
+        return {
+          taskId: kb.id,
+          kbIndex,
+          complexity: rules.complexity,
+          ustPoints: points,
+          estimateMade: defaultEstimate,
+          customTitle: item.summary,
+          coherentDescription: item.description,
+          source: `IA Refinada (${aiConfig.provider === 'gemini' ? 'Gemini' : 'DeepSeek'})`,
+          relatedCommitId: config.azCommit || config.ghCommit,
+          relatedCommitUrl: (config.azUrl && config.azCommit)
+            ? `${config.azUrl}/commit/${config.azCommit}`
+            : (config.ghRepo && config.ghCommit)
+              ? `https://github.com/${config.ghRepo}/commit/${config.ghCommit}`
+              : undefined,
+          contractItem: config.contractItem,
+        };
+      });
+
+      setTasks(convertedTasks);
+      setStatusMsg({ msg: "Tarefas refinadas com IA!", type: "success" });
+    } catch (e: any) {
+      if (e.name === 'AbortError') {
+        setStatusMsg({ msg: "Processamento de IA cancelado pelo usuário.", type: "neutral" });
+      } else {
+        setStatusMsg({ msg: "Erro IA: " + e.message, type: "error" });
+      }
+    } finally {
+      setLoadingAi(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  const exportCsv = () => {
+    if (tasks.length === 0) return;
+
+    let csv =
+      "ID,Work Item Type,Title,Assigned To,State,ID SPF,Effort,Estimate Made,Item Contrato,UST,Activity,Complexidade,Area Path,Iteration Path,Description\n";
+
+    const area = config.areaPath || "Area\\Path";
+    let fullIter = config.iterationPath;
+    if (config.areaPath.includes("Refatoração")) {
+      fullIter = `SPF-SIAFIC\\Refatoração\\Refatoração - ${config.iterationPath}`;
+    } else if (config.areaPath.includes("Fábrica")) {
+      fullIter = `SPF-SIAFIC\\SPF Fábrica\\SPF - ${config.iterationPath}`;
+    } else if (config.areaPath.includes("SIAFIC Asp.Net Core") || config.areaPath.includes("Siafic Asp.Net Core")) {
+      fullIter = `SPF-SIAFIC\\Siafic Asp.Net Core\\Siafic Asp.Net Core - ${config.iterationPath}`;
+    } else {
+      if (!config.iterationPath.includes("\\")) {
+        const parts = config.areaPath.split('\\');
+        if (parts.length > 0) {
+          fullIter = `${parts[0]}\\${parts[1] || parts[0]}\\${config.iterationPath}`;
+        }
+      }
+    }
+
+    tasks.forEach((t, index) => {
+      const tit = `"${t.customTitle.replace(/"/g, '""')}"`;
+      const descContent = t.coherentDescription;
+      const desc = `"${descContent.replace(/"/g, '""')}"`;
+
+      let comp =
+        t.complexity === "unica" ? "ÚNICA" : t.complexity.toUpperCase();
+
+      const row = [
+        "",
+        "Task",
+        tit,
+        `"${config.assignedTo}"`,
+        "To Do",
+        `"${t.taskId}"`,
+        `"${t.estimateMade ?? 0}"`,
+        `"${t.estimateMade ?? 0}"`,
+        `"${t.contractItem}"`,
+        `"${t.ustPoints}"`,
+        "Development",
+        `"${comp}"`,
+        `"${area}"`,
+        `"${fullIter}"`,
+        desc,
+      ].join(",");
+
+      csv += row + "\n";
+    });
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `tasks_${Date.now()}.csv`;
+    link.click();
+  };
+
+  const updateTask = (index: number, field: keyof Task, value: any) => {
+    const newTasks = [...tasks];
+    const task = newTasks[index];
+    (task as any)[field] = value;
+
+    if (field === "kbIndex") {
+      const kb = KNOWLEDGE_BASE[value];
+      task.taskId = kb.id;
+      const firstComp = Object.keys(kb.complexities)[0] as any;
+      task.complexity = firstComp;
+      task.ustPoints = (kb.complexities as any)[firstComp];
+
+      if (firstComp === "media") task.estimateMade = 1;
+      else if (firstComp === "alta" || firstComp === "unica") task.estimateMade = 2;
+      else task.estimateMade = 0.5;
+
+    } else if (field === "complexity") {
+      const kb = KNOWLEDGE_BASE[task.kbIndex];
+      task.ustPoints = (kb.complexities as any)[value] || 0;
+
+      if (value === "media") task.estimateMade = 1;
+      else if (value === "alta" || value === "unica") task.estimateMade = 2;
+      else task.estimateMade = 0.5;
+    }
+
+    setTasks(newTasks);
+  };
+
+  const removeTask = (index: number) => {
+    setTasks(tasks.filter((_, i) => i !== index));
+  };
+
+  const badgeColor = (c: string) => {
+    if (c === "baixa")
+      return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+    if (c === "media")
+      return "bg-accent-light0/20 text-accent border-accent-light0/30";
+    if (c === "alta") return "bg-red-500/20 text-red-400 border-red-500/30";
+    return "bg-accent-light0/20 text-accent border-accent-light0/30";
+  };
+
+  const handleNextStep1 = () => {
+    if (!config.areaPath || !config.iterationPath || !config.contractItem) {
+      setStatusMsg({ msg: "Preencha Área, Iteration Path e Item Contrato para prosseguir.", type: "error" });
+      return;
+    }
+    setStatusMsg(null);
+    setCurrentStep(2);
+  };
+
+  const handleSkipCode = () => {
+    if (!config.areaPath || !config.iterationPath || !config.contractItem) {
+      setStatusMsg({ msg: "Preencha Área, Iteration Path e Item Contrato para prosseguir.", type: "error" });
+      return;
+    }
+    if (!descInput.trim()) {
+      setStatusMsg({ msg: "Para pular o código, é obrigatório preencher a Descrição Técnica.", type: "error" });
+      return;
+    }
+    setStatusMsg(null);
+    setDiffInput("");
+    setConfig(prev => ({ ...prev, azCommit: "", ghCommit: "" }));
+    setCurrentStep(3);
+  };
+
+  const handleNextStep2 = () => {
+    if (!diffInput && !config.azCommit) {
+      setStatusMsg({ msg: "Forneça um Diff ou selecione um Commit para prosseguir.", type: "error" });
+      return;
+    }
+    setStatusMsg(null);
+    setCurrentStep(3);
+  };
+
+  return (
+    <div className="space-y-6">
+      <WizardProgress currentStep={currentStep} />
+
+      {statusMsg && (
+        <div
+          className={`p-3 rounded-lg text-sm font-bold border ${statusMsg.type === "error"
+            ? "bg-red-500/10 text-red-400 border-red-500/20"
+            : statusMsg.type === "success"
+              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+              : "bg-gray-800 text-accent-light/70 border-gray700"
+            }`}
+        >
+          {statusMsg.msg}
+        </div>
+      )}
+
+      {currentStep === 1 && (
+        <Step1Context
+          config={config}
+          setConfig={setConfig}
+          descInput={descInput}
+          setDescInput={setDescInput}
+          areaPaths={areaPaths}
+          contractItems={contractItems}
+          onNext={handleNextStep1}
+          onSkipCode={handleSkipCode}
+        />
+      )}
+
+      {currentStep === 2 && (
+        <Step2Code
+          config={config}
+          setConfig={setConfig}
+          diffInput={diffInput}
+          setDiffInput={setDiffInput}
+          azureConfig={azureConfig}
+          selectedRepos={selectedRepos || []}
+          selectedRepoId={selectedRepoId}
+          setSelectedRepoId={setSelectedRepoId}
+          filterAuthor={filterAuthor}
+          setFilterAuthor={setFilterAuthor}
+          recentCommits={recentCommits}
+          setRecentCommits={setRecentCommits}
+          selectedCommitIds={selectedCommitIds}
+          handleCommitSelect={handleCommitSelect}
+          loading={loading}
+          setLoading={setLoading}
+          fetchAzure={fetchAzure}
+          setStatusMsg={setStatusMsg}
+          onBack={() => setCurrentStep(1)}
+          onNext={handleNextStep2}
+          processHeuristic={processHeuristic}
+        />
+      )}
+
+      {currentStep === 3 && (
+        <Step3Review
+          tasks={tasks}
+          setTasks={setTasks}
+          loadingAi={loadingAi}
+          refineWithAI={refineWithAI}
+          exportCsv={exportCsv}
+          updateTask={updateTask}
+          removeTask={removeTask}
+          badgeColor={badgeColor}
+          onBack={() => setCurrentStep(2)}
+          onReset={() => {
+            setTasks([]);
+            setDiffInput("");
+            setCurrentStep(1);
+          }}
+          cancelAiProcessing={cancelAiProcessing}
+        />
+      )}
+    </div>
+  );
 };
 
 export default TaskGenerator;
