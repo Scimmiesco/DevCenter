@@ -75,11 +75,11 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-300" onClick={onClose}>
             <div
-                className="bg-slate-900 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-800 animate-in zoom-in-95 duration-200"
+                className="bg-gray900 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col border border-gray800 animate-in zoom-in-95 duration-200"
                 onClick={e => e.stopPropagation()}
             >
                 {/* Header */}
-                <div className="px-6 py-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
+                <div className="px-6 py-5 border-b border-gray800 flex items-center justify-between bg-gray950/50">
                     <div className="flex items-center gap-4">
                         <span className="text-3xl filter drop-shadow-md" role="img" aria-label={commit.category}>
                             {getCategoryEmoji(commit.category)}
@@ -87,14 +87,14 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
                         <div>
                             <div className="flex items-center gap-3">
                                 <h2 className="text-xl font-bold text-white">Detalhes do Commit</h2>
-                                {loading && <Loader2 size={18} className="animate-spin text-blue-500" />}
+                                {loading && <Loader2 size={18} className="animate-spin text-accent-light0" />}
                             </div>
-                            <p className="text-sm text-slate-400 font-medium mt-0.5">{getCategoryLabel(commit.category)}</p>
+                            <p className="text-sm text-accent-light/70 font-medium mt-0.5">{getCategoryLabel(commit.category)}</p>
                         </div>
                     </div>
                     <button
                         onClick={onClose}
-                        className="p-2.5 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white"
+                        className="p-2.5 hover:bg-gray800 rounded-full transition-colors text-accent-light/70 hover:text-white"
                     >
                         <X size={24} />
                     </button>
@@ -109,8 +109,8 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
                             {commit.message}
                         </h3>
                         {/* Body / Description */}
-                        <div className={`bg-slate-950 rounded-xl p-5 border border-slate-800 text-sm text-slate-300 whitespace-pre-wrap leading-relaxed font-mono ${loading ? 'opacity-50' : ''}`}>
-                            {commit.body || <span className="text-slate-500 italic">Nenhuma descrição detalhada disponível.</span>}
+                        <div className={`bg-gray950 rounded-xl p-5 border border-gray800 text-sm text-accent-light whitespace-pre-wrap leading-relaxed font-mono ${loading ? 'opacity-50' : ''}`}>
+                            {commit.body || <span className="text-accent-light/70 italic">Nenhuma descrição detalhada disponível.</span>}
                         </div>
                         {error && (
                             <p className="text-sm text-red-400 mt-2 flex items-center gap-2">
@@ -122,67 +122,67 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
                     {/* Metadata Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-8">
 
-                        <div className="flex items-center gap-3 text-sm text-slate-400">
-                            <div className="p-2 bg-slate-800 rounded-lg text-blue-400">
+                        <div className="flex items-center gap-3 text-sm text-accent-light/70">
+                            <div className="p-2 bg-gray800 rounded-lg text-accent">
                                 <GitCommit size={18} />
                             </div>
                             <div className="flex flex-col">
-                                <span className="text-[10px] uppercase font-bold text-slate-500">Hash</span>
-                                <span className="font-mono text-slate-200 select-all">{commit.sha.substring(0, 7)}</span>
+                                <span className="text-[10px] uppercase font-bold text-accent-light/70">Hash</span>
+                                <span className="font-mono text-accent-light select-all">{commit.sha.substring(0, 7)}</span>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-3 text-sm text-slate-400">
-                            <div className="p-2 bg-slate-800 rounded-lg text-orange-500">
+                        <div className="flex items-center gap-3 text-sm text-accent-light/70">
+                            <div className="p-2 bg-gray800 rounded-lg text-orange-500">
                                 <Calendar size={18} />
                             </div>
                             <div className="flex flex-col">
-                                <span className="text-[10px] uppercase font-bold text-slate-500">Data</span>
-                                <span className="text-slate-200">{new Date(commit.date).toLocaleString('pt-BR')}</span>
+                                <span className="text-[10px] uppercase font-bold text-accent-light/70">Data</span>
+                                <span className="text-accent-light">{new Date(commit.date).toLocaleString('pt-BR')}</span>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-3 text-sm text-slate-400">
-                            <div className="p-2 bg-slate-800 rounded-lg text-emerald-500">
+                        <div className="flex items-center gap-3 text-sm text-accent-light/70">
+                            <div className="p-2 bg-gray800 rounded-lg text-emerald-500">
                                 <FolderGit2 size={18} />
                             </div>
                             <div className="flex flex-col">
-                                <span className="text-[10px] uppercase font-bold text-slate-500">Repositório</span>
-                                <span className="font-medium text-slate-200">{commit.repo}</span>
+                                <span className="text-[10px] uppercase font-bold text-accent-light/70">Repositório</span>
+                                <span className="font-medium text-accent-light">{commit.repo}</span>
                             </div>
                         </div>
 
                         {commit.branch && (
-                            <div className="flex items-center gap-3 text-sm text-slate-400">
-                                <div className="p-2 bg-slate-800 rounded-lg text-purple-500">
+                            <div className="flex items-center gap-3 text-sm text-accent-light/70">
+                                <div className="p-2 bg-gray800 rounded-lg text-purple-500">
                                     <GitBranch size={18} />
                                 </div>
                                 <div className="flex flex-col">
-                                    <span className="text-[10px] uppercase font-bold text-slate-500">Branch</span>
-                                    <span className="text-slate-200">{commit.branch}</span>
+                                    <span className="text-[10px] uppercase font-bold text-accent-light/70">Branch</span>
+                                    <span className="text-accent-light">{commit.branch}</span>
                                 </div>
                             </div>
                         )}
 
                         {commit.scope && (
-                            <div className="flex items-center gap-3 text-sm text-slate-400">
-                                <div className="p-2 bg-slate-800 rounded-lg text-cyan-500">
+                            <div className="flex items-center gap-3 text-sm text-accent-light/70">
+                                <div className="p-2 bg-gray800 rounded-lg text-cyan-500">
                                     <Tag size={18} />
                                 </div>
                                 <div className="flex flex-col">
-                                    <span className="text-[10px] uppercase font-bold text-slate-500">Escopo</span>
-                                    <span className="font-semibold text-slate-200">{commit.scope}</span>
+                                    <span className="text-[10px] uppercase font-bold text-accent-light/70">Escopo</span>
+                                    <span className="font-semibold text-accent-light">{commit.scope}</span>
                                 </div>
                             </div>
                         )}
 
                         {commit.context && (
-                            <div className="flex items-center gap-3 text-sm text-slate-400 md:col-span-2">
-                                <div className="p-2 bg-slate-800 rounded-lg text-slate-200">
+                            <div className="flex items-center gap-3 text-sm text-accent-light/70 md:col-span-2">
+                                <div className="p-2 bg-gray800 rounded-lg text-accent-light">
                                     <FileText size={18} />
                                 </div>
                                 <div className="flex flex-col">
-                                    <span className="text-[10px] uppercase font-bold text-slate-500">Contexto / PR</span>
+                                    <span className="text-[10px] uppercase font-bold text-accent-light/70">Contexto / PR</span>
                                     <span className="font-medium text-white">{commit.context}</span>
                                 </div>
                             </div>
@@ -193,27 +193,27 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
                     {/* File Changes */}
                     {commit.changes && commit.changes.length > 0 && (
                         <div className="mb-8">
-                            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+                            <h4 className="text-xs font-bold text-accent-light/70 uppercase tracking-wider mb-4 flex items-center gap-2">
                                 <FileCode size={16} /> Arquivos Alterados ({commit.changes.length})
                             </h4>
-                            <div className="bg-slate-950 border border-slate-800 rounded-xl overflow-hidden">
+                            <div className="bg-gray950 border border-gray800 rounded-xl overflow-hidden">
                                 {commit.changes.map((change, idx) => (
-                                    <div key={idx} className="flex items-center justify-between px-4 py-3 border-b border-slate-800 last:border-0 hover:bg-slate-900 transition-colors text-sm group">
+                                    <div key={idx} className="flex items-center justify-between px-4 py-3 border-b border-gray800 last:border-0 hover:bg-gray900 transition-colors text-sm group">
                                         <div className="flex items-center gap-3 overflow-hidden">
                                             {change.status === 'added' ? <FilePlus size={16} className="text-emerald-500 shrink-0" /> :
                                                 change.status === 'deleted' ? <FileMinus size={16} className="text-rose-500 shrink-0" /> :
-                                                    <FileEdit size={16} className="text-blue-500 shrink-0" />}
-                                            <span className="truncate font-mono text-slate-300 group-hover:text-white transition-colors" title={change.fileName}>{change.fileName}</span>
+                                                    <FileEdit size={16} className="text-accent-light0 shrink-0" />}
+                                            <span className="truncate font-mono text-accent-light group-hover:text-white transition-colors" title={change.fileName}>{change.fileName}</span>
                                         </div>
                                         <div className="flex items-center gap-4 shrink-0 ml-4">
                                             {(change.additions !== undefined || change.deletions !== undefined) && (
-                                                <div className="flex items-center gap-3 text-xs font-mono bg-slate-900 px-2 py-1 rounded">
+                                                <div className="flex items-center gap-3 text-xs font-mono bg-gray900 px-2 py-1 rounded">
                                                     {change.additions && <span className="text-emerald-500">+{change.additions}</span>}
                                                     {change.deletions && <span className="text-rose-500">-{change.deletions}</span>}
                                                 </div>
                                             )}
                                             {change.url && (
-                                                <a href={change.url} target="_blank" rel="noopener noreferrer" className="text-slate-600 hover:text-blue-400 transition-colors">
+                                                <a href={change.url} target="_blank" rel="noopener noreferrer" className="text-accent-light/70 hover:text-accent transition-colors">
                                                     <ExternalLink size={14} />
                                                 </a>
                                             )}
@@ -225,12 +225,12 @@ const CommitDetailModal: React.FC<CommitDetailModalProps> = ({ commit: initialCo
                     )}
 
                     {/* Actions */}
-                    <div className="flex justify-end pt-6 border-t border-slate-800">
+                    <div className="flex justify-end pt-6 border-t border-gray800">
                         <a
                             href={commit.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-500 transition-all shadow-lg shadow-blue-900/40 hover:shadow-blue-900/60 active:scale-95 text-sm font-bold"
+                            className="inline-flex items-center gap-2 px-6 py-3 bg-accent text-white rounded-xl hover:bg-accent-light0 transition-all shadow-lg shadow-accent/40 hover:shadow-accent/60 active:scale-95 text-sm font-bold"
                         >
                             <ExternalLink size={18} />
                             Ver no {provider === 'github' ? 'GitHub' : 'Azure DevOps'}
